@@ -1,6 +1,8 @@
 # PingChecker
 
-**PingChecker** is a lightweight, standalone utility written in Go. It allows gamers to monitor the real-time network latency (ping) of a specific game process, rather than the general system ping.
+**PingChecker** is a lightweight, standalone utility to monitor the real-time network latency (ping) of a specific (game) process.
+
+<img width="493" height="276" alt="image" src="https://github.com/user-attachments/assets/435121e8-0422-464e-a5c6-1944b29a36db" />
 
 It uses **Fyne** for a native, GPU-accelerated UI and **Raw ICMP Sockets** for accurate network measurement.
 
@@ -110,4 +112,5 @@ A: You likely don't have a C Compiler (GCC) installed, or your graphics drivers 
 A: You are not running as Administrator.
 
 **Q: The process list is empty.**
+
 A: Ensure you are running as Administrator. Standard users cannot read the paths of processes started by other users or the system.
