@@ -1,12 +1,8 @@
 # Binaries / build output
 /bin/
-/cmd/*/*.exe
-*.exe
-*.exe~
 *.dll
 *.so
 *.dylib
-PingChecker.exe
 bin/
 
 # Build artefacts
@@ -23,9 +19,6 @@ bin/
 Gopkg.lock
 Gopkg.toml
 
-# Go tools
-*.exe
-*.exe~
 
 # IDE / editor
 .vscode/
