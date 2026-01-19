@@ -1,0 +1,44 @@
+# Binaries / build output
+/bin/
+/cmd/*/*.exe
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+PingChecker.exe
+bin/
+
+# Build artefacts
+/dist/
+/build/
+/pkg/
+*.out
+*.test
+*.coverprofile
+*.log
+
+# Dependency managers / vendoring
+/vendor/
+Gopkg.lock
+Gopkg.toml
+
+# Go tools
+*.exe
+*.exe~
+
+# IDE / editor
+.vscode/
+.idea/
+*.iml
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Temporary / cache
+*.tmp
+*.cache
+npm-debug.log
+yarn-error.log

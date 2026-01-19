@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"image/color"
 	"net"
 	"sort"
 	"strings"
@@ -16,9 +17,11 @@ import (
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/app"
+	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/data/binding"
 	"fyne.io/fyne/v2/dialog"
+	"fyne.io/fyne/v2/layout"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 )
@@ -45,49 +48,35 @@ func (s *AutoRefreshSelect) Tapped(e *fyne.PointEvent) {
 
 // --- End Custom Widget ---
 
-type MonitorState struct {
-	TargetPID int32
-	TargetIP  string
-	mu        sync.RWMutex
-	cancel    context.CancelFunc
+// ConnectionData holds the state of a specific connection
+type ConnectionData struct {
+	ID       string // IP:Port key
+	IP       string
+	Port     int
+	Type     string    // "Game", "Login", "Other"
+	LastPing time.Time // When did we last ping this?
+	Latency  int64
+	Status   string
+	IsActive bool
+}
+
+// UIItem is the simplified struct passed to the Fyne List Binding
+type UIItem struct {
+	Label   string
+	Latency string
+	Type    string // Used for color coding
 }
 
 var (
-	state = &MonitorState{}
-
-	// Data Bindings
-	pingDisplay      = binding.NewString()
-	displayIP        = binding.NewString()
-	displayPortLabel = binding.NewString()
-	displayPortVal   = binding.NewString()
+	currentCancel context.CancelFunc
+	// Thread-safe data binding for the list
+	listData = binding.NewUntypedList()
 )
-
-const pingPrefix = "2. Real-time Latency: "
 
 func main() {
 	a := app.New()
 	w := a.NewWindow("PingChecker")
-	w.Resize(fyne.NewSize(500, 250))
-
-	// UI Elements
-	lblStatus := widget.NewLabelWithData(pingDisplay)
-	lblStatus.TextStyle = fyne.TextStyle{Bold: true}
-
-	// Target Row
-	lblIP := widget.NewLabelWithData(displayIP)
-
-	lblPortLabel := widget.NewLabelWithData(displayPortLabel)
-	lblPortLabel.TextStyle = fyne.TextStyle{Bold: true}
-
-	lblPortVal := widget.NewLabelWithData(displayPortVal)
-
-	targetRow := container.NewHBox(lblIP, lblPortLabel, lblPortVal)
-
-	// Initial State
-	pingDisplay.Set(pingPrefix + "Waiting for selection...")
-	displayIP.Set("Target: None")
-	displayPortLabel.Set("")
-	displayPortVal.Set("")
+	w.Resize(fyne.NewSize(550, 400)) // Fixed reasonable size
 
 	// Process Selector
 	processList := NewAutoRefreshSelect(func(selected string) {
@@ -103,34 +92,87 @@ func main() {
 		startMonitoring(pid)
 	})
 
-	// UPDATED: Info Button with Custom Dialog for Bold Text
-	btnInfo := widget.NewButtonWithIcon("More Info", theme.InfoIcon(), func() {
-		// Define the text with Markdown syntax
-		mdText := "**If Port 7000+:**\nGame Server. This is the TRUE ping.\n\n" +
-			"**If Port 443/80:**\nLogin/Lobby Server. Stable, but not 'Gameplay' ping.\n\n" +
-			"Wait up to 30 seconds for the program to sync and find new port.\n\n" +
-			"Note: If **Port 7000+** shows 'Timeout', games blocking pings RIP."
+	// --- Dynamic List Setup ---
+	// widget.List is efficient and thread-safe via binding
+	connList := widget.NewListWithData(
+		listData,
+		func() fyne.CanvasObject {
+			// Template for a row
+			return container.NewHBox(
+				canvas.NewText("TYPE", color.White),
+				canvas.NewText("0.0.0.0:0000", color.White),
+				layout.NewSpacer(),
+				widget.NewLabel("000 ms"),
+			)
+		},
+		func(i binding.DataItem, o fyne.CanvasObject) {
+			// Bind data to template
+			item, _ := i.(binding.Untyped).Get()
+			uiData := item.(UIItem)
 
-		// Create a RichText widget to render the Markdown
-		content := widget.NewRichTextFromMarkdown(mdText)
+			box := o.(*fyne.Container)
+			txtType := box.Objects[0].(*canvas.Text)
+			txtIP := box.Objects[1].(*canvas.Text)
+			lblPing := box.Objects[3].(*widget.Label)
 
-		// Create a custom dialog containing the RichText
-		d := dialog.NewCustom("Port Guide", "OK", content, w)
+			// Color Coding
+			var typeColor color.Color
+			if uiData.Type == "Game" {
+				typeColor = color.RGBA{0, 180, 0, 255} // Green
+				txtType.Text = "[GAME]"
+			} else if uiData.Type == "Login" {
+				typeColor = color.RGBA{0, 100, 200, 255} // Blue
+				txtType.Text = "[LOGIN]"
+			} else {
+				typeColor = theme.ForegroundColor()
+				txtType.Text = "[NET]"
+			}
 
-		// Resize it slightly so text wraps nicely
+			txtType.Color = typeColor
+			txtType.Refresh()
+
+			txtIP.Text = uiData.Label
+			txtIP.TextStyle = fyne.TextStyle{Bold: true}
+			txtIP.Color = typeColor
+			txtIP.Refresh()
+
+			lblPing.SetText(uiData.Latency)
+		},
+	)
+
+	// Legend Button
+	btnInfo := widget.NewButtonWithIcon("Legend", theme.InfoIcon(), func() {
+		greenText := canvas.NewText("Game Server (Port 7000+)", color.RGBA{0, 180, 0, 255})
+		greenText.TextStyle = fyne.TextStyle{Bold: true}
+		blueText := canvas.NewText("Login/Web (Port 80/443)", color.RGBA{0, 100, 200, 255})
+		blueText.TextStyle = fyne.TextStyle{Bold: true}
+
+		content := container.NewVBox(
+			widget.NewLabel("Scan Intervals:"),
+			widget.NewLabel("- Game Server: Every 5 seconds"),
+			widget.NewLabel("- Login Server: Every 30 seconds"),
+			widget.NewSeparator(),
+			container.NewHBox(widget.NewIcon(theme.MediaRecordIcon()), greenText),
+			container.NewHBox(widget.NewIcon(theme.MediaRecordIcon()), blueText),
+		)
+
+		d := dialog.NewCustom("Info", "OK", content, w)
 		d.Resize(fyne.NewSize(400, 300))
 		d.Show()
 	})
 
 	// Layout
-	content := container.NewVBox(
-		widget.NewLabel("1. Select Game Process:"),
-		processList,
-		widget.NewSeparator(),
-		lblStatus,
-		targetRow,
-		widget.NewSeparator(),
-		btnInfo,
+	content := container.NewBorder(
+		container.NewVBox(
+			widget.NewLabel("1. Select Game Process:"),
+			processList,
+			widget.NewSeparator(),
+			widget.NewLabelWithStyle("Active Connections:", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+		),
+		btnInfo,  // Bottom
+		nil,      // Left
+		nil,      // Right
+		connList, // Center (Takes all available space)
 	)
 
 	w.SetContent(content)
@@ -151,37 +193,28 @@ func getProcessList() []string {
 		if err != nil || name == "" {
 			continue
 		}
-
 		exePath, err := p.Exe()
 		if err != nil {
 			continue
 		}
-
 		lowerPath := strings.ToLower(exePath)
 		if strings.Contains(lowerPath, `c:\windows`) {
 			continue
 		}
-
 		entry := fmt.Sprintf("%s (%d)", name, p.Pid)
-
 		if isLikelyGame(lowerPath) {
 			likelyGames = append(likelyGames, entry)
 		} else {
 			otherApps = append(otherApps, entry)
 		}
 	}
-
 	sort.Strings(likelyGames)
 	sort.Strings(otherApps)
-
 	return append(likelyGames, otherApps...)
 }
 
 func isLikelyGame(path string) bool {
-	keywords := []string{
-		"steam", "steamapps", "common", "riot games",
-		"epic games", "ubisoft", "battle.net", "xboxgames", "game",
-	}
+	keywords := []string{"steam", "riot", "epic", "game", "xbox", "battle.net"}
 	for _, k := range keywords {
 		if strings.Contains(path, k) {
 			return true
@@ -191,162 +224,208 @@ func isLikelyGame(path string) bool {
 }
 
 func startMonitoring(pid int32) {
-	state.mu.Lock()
-	defer state.mu.Unlock()
-
-	if state.cancel != nil {
-		state.cancel()
+	if currentCancel != nil {
+		currentCancel()
 	}
-
 	ctx, cancel := context.WithCancel(context.Background())
-	state.cancel = cancel
-	state.TargetPID = pid
-	state.TargetIP = ""
+	currentCancel = cancel
 
-	// Reset UI
-	displayIP.Set(fmt.Sprintf("Target PID: %d (Scanning...)", pid))
-	displayPortLabel.Set("")
-	displayPortVal.Set("")
-	pingDisplay.Set(pingPrefix + "Scanning...")
+	// Clear list
+	listData.Set(nil)
 
 	go monitorLoop(ctx, pid)
 }
 
 func monitorLoop(ctx context.Context, pid int32) {
+	// We tick every 1 second to be responsive, but individual pings are throttled
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
 
-	lastScanTime := time.Time{}
-	scanInterval := 1 * time.Second
+	// State Map: Keep track of connections so we know when to ping them next
+	stateMap := make(map[string]*ConnectionData)
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if time.Since(lastScanTime) >= scanInterval {
-				lastScanTime = time.Now()
-				currentIP, currentPort := resolveGameIP(pid)
+			// 1. Get current connections from OS
+			currentConns := getRawConnections(pid)
+			activeIDs := make(map[string]bool)
 
-				if currentIP != "" {
-					scanInterval = 30 * time.Second
-					state.mu.Lock()
-					if state.TargetIP != currentIP {
-						state.TargetIP = currentIP
-						if ctx.Err() == nil {
-							displayIP.Set(fmt.Sprintf("Target: %s", currentIP))
-							displayPortLabel.Set("Port:")
-							displayPortVal.Set(fmt.Sprintf("%d", currentPort))
-						}
+			// 2. Update State Map
+			for _, c := range currentConns {
+				id := fmt.Sprintf("%s:%d", c.IP, c.Port)
+				activeIDs[id] = true
+
+				if _, exists := stateMap[id]; !exists {
+					// New connection found
+					stateMap[id] = &ConnectionData{
+						ID:       id,
+						IP:       c.IP,
+						Port:     c.Port,
+						Type:     determineType(c.Port),
+						LastPing: time.Time{}, // Never pinged
+						Status:   "Waiting...",
 					}
-					state.mu.Unlock()
-				} else {
-					scanInterval = 1 * time.Second
-					state.mu.RLock()
-					if state.TargetIP == "" && ctx.Err() == nil {
-						pingDisplay.Set(pingPrefix + "No connection found")
-						displayIP.Set("Target: None")
-						displayPortLabel.Set("")
-						displayPortVal.Set("")
-					}
-					state.mu.RUnlock()
 				}
 			}
 
-			state.mu.RLock()
-			target := state.TargetIP
-			state.mu.RUnlock()
-
-			if target != "" {
-				success := doPing(ctx, target)
-				if !success {
-					scanInterval = 1 * time.Second
-					lastScanTime = time.Time{}
+			// 3. Remove stale connections
+			for id := range stateMap {
+				if !activeIDs[id] {
+					delete(stateMap, id)
 				}
+			}
+
+			// 4. Check who needs a Ping
+			var wg sync.WaitGroup
+			now := time.Now()
+
+			for _, conn := range stateMap {
+				interval := getInterval(conn.Type)
+
+				if now.Sub(conn.LastPing) >= interval {
+					conn.LastPing = now // Mark as pinged immediately to prevent double scheduling
+					wg.Add(1)
+					go func(c *ConnectionData) {
+						defer wg.Done()
+						lat, status, active := doPing(c.IP)
+						c.Latency = lat
+						c.Status = status
+						c.IsActive = active
+					}(conn)
+				}
+			}
+
+			// Wait for this batch to finish so UI doesn't flicker partial updates
+			// (Since pings are fast/async, this wait is acceptable for a 1s tick)
+			wg.Wait()
+
+			// 5. Update UI Binding
+			// We convert our map to a slice for the List
+			if ctx.Err() == nil {
+				updateBinding(stateMap)
 			}
 		}
 	}
 }
 
-func resolveGameIP(pid int32) (string, int) {
-	conns, err := psnet.ConnectionsPid("inet", pid)
-	if err != nil {
-		return "", 0
+func updateBinding(data map[string]*ConnectionData) {
+	// Convert map to slice
+	var uiList []interface{}
+
+	// Copy to slice
+	tempList := make([]*ConnectionData, 0, len(data))
+	for _, v := range data {
+		tempList = append(tempList, v)
 	}
 
-	var bestIP string
-	var bestPort int
-	var bestScore int = -1
+	// Sort: Game > Other > Login
+	sort.Slice(tempList, func(i, j int) bool {
+		scoreI := getScore(tempList[i].Type)
+		scoreJ := getScore(tempList[j].Type)
+		return scoreI > scoreJ
+	})
+
+	for _, c := range tempList {
+		pingText := c.Status
+		if c.IsActive {
+			pingText = fmt.Sprintf("%d ms (%s)", c.Latency, c.Status)
+		}
+
+		uiList = append(uiList, UIItem{
+			Label:   fmt.Sprintf("%s:%d", c.IP, c.Port),
+			Type:    c.Type,
+			Latency: pingText,
+		})
+	}
+
+	// Thread-safe update
+	listData.Set(uiList)
+}
+
+func getRawConnections(pid int32) []ConnectionData {
+	conns, err := psnet.ConnectionsPid("inet", pid)
+	if err != nil {
+		return []ConnectionData{}
+	}
+
+	unique := make(map[string]bool)
+	var results []ConnectionData
 
 	for _, c := range conns {
-		score := 0
 		ip := c.Raddr.IP
 		port := int(c.Raddr.Port)
-
 		if !isPublicIP(ip) {
 			continue
 		}
 
-		if c.Type == 2 {
-			score += 100
+		key := fmt.Sprintf("%s:%d", ip, port)
+		if unique[key] {
+			continue
 		}
-		if port != 80 && port != 443 && port != 8080 {
-			score += 50
-		}
+		unique[key] = true
 
-		if score > bestScore {
-			bestScore = score
-			bestIP = ip
-			bestPort = port
-		}
+		results = append(results, ConnectionData{IP: ip, Port: port})
 	}
-	return bestIP, bestPort
+	return results
 }
 
-func doPing(ctx context.Context, ipAddr string) bool {
+func determineType(port int) string {
+	if port >= 7000 {
+		return "Game"
+	} else if port == 80 || port == 443 || port == 8080 {
+		return "Login"
+	}
+	return "Other"
+}
+
+func getInterval(t string) time.Duration {
+	if t == "Game" {
+		return 5 * time.Second
+	} else if t == "Login" {
+		return 30 * time.Second
+	}
+	return 5 * time.Second // Other
+}
+
+func getScore(t string) int {
+	if t == "Game" {
+		return 3
+	}
+	if t == "Other" {
+		return 2
+	}
+	return 1
+}
+
+func doPing(ipAddr string) (int64, string, bool) {
 	pinger, err := probing.NewPinger(ipAddr)
 	if err != nil {
-		if ctx.Err() == nil {
-			pingDisplay.Set(pingPrefix + "Error")
-		}
-		return false
+		return 0, "Error", false
 	}
-
 	pinger.Count = 1
 	pinger.Timeout = 900 * time.Millisecond
 	pinger.SetPrivileged(true)
 
 	err = pinger.Run()
-
-	if ctx.Err() != nil {
-		return false
-	}
-
 	if err != nil {
-		pingDisplay.Set(pingPrefix + "Timeout")
-		return false
+		return 0, "Timeout", false
 	}
 
 	stats := pinger.Statistics()
 	if stats.PacketsRecv > 0 {
-		latency := stats.AvgRtt
-		ms := latency.Milliseconds()
-
-		var status string
-		if ms < 80 {
-			status = "🟢 Excellent"
-		} else if ms < 140 {
-			status = "🟡 Good"
-		} else {
-			status = "🔴 Lag"
+		ms := stats.AvgRtt.Milliseconds()
+		status := "🔴"
+		if ms < 60 {
+			status = "🟢"
+		} else if ms < 120 {
+			status = "🟡"
 		}
-
-		pingDisplay.Set(fmt.Sprintf("%s%d ms (%s)", pingPrefix, ms, status))
-		return true
-	} else {
-		pingDisplay.Set(pingPrefix + "Packet Loss")
-		return false
+		return ms, status, true
 	}
+	return 0, "Packet Loss", false
 }
 
 func isPublicIP(ipStr string) bool {
